@@ -2,7 +2,8 @@
 
 ## Your steps
 
-The worker is deployed to LiveKit Cloud, so there is nothing to start. From your phone:
+Testing is finished and the LiveKit Cloud agent has been deleted. To run again, deploy it first
+(see "Deploy"). Then, from your phone:
 
 1. Open <https://agents-playground.livekit.io> in the browser and sign in with your LiveKit Cloud account.
 2. Pick the `heckle-o2pxy34d` project and tap **Connect**. Mute the mic; the narrator doesn't listen.
@@ -44,8 +45,14 @@ events instead of having a reply cut off.
 
 ## Deploy
 
-The agent runs on LiveKit Cloud (agent `CA_mGXcTcrKJGPB`, region `us-east`), configured by
-`livekit.toml` and the `Dockerfile`. The `lk` CLI reads `LIVEKIT_URL`, `LIVEKIT_API_KEY` and
+The agent ran on LiveKit Cloud in region `us-east`, built from the `Dockerfile`. The agent ID in
+`livekit.toml` (`CA_mGXcTcrKJGPB`) was deleted after testing, so create a new one first; this
+rewrites `livekit.toml`:
+
+```bash
+lk agent create --region us-east --secrets-file <file with the three secrets below>
+```
+ The `lk` CLI reads `LIVEKIT_URL`, `LIVEKIT_API_KEY` and
 `LIVEKIT_API_SECRET` from the environment. Run these from the repo root.
 
 Redeploy after a code change:
