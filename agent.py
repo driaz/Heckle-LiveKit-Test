@@ -179,7 +179,7 @@ async def entrypoint(ctx: JobContext) -> None:
     narrator = Narrator()
     session = new_agent_session()
     # reads RUNWAYML_API_SECRET and LIVEKIT_* from the environment
-    avatar = runway.AvatarSession(preset_id="game-character", max_duration=AVATAR_MAX_DURATION_S)
+    avatar = runway.AvatarSession(preset_id="cat-character", max_duration=AVATAR_MAX_DURATION_S)
     avatar_video_at: asyncio.Future[float] = asyncio.get_running_loop().create_future()
     watchers: set[asyncio.Task] = set()
     last_loud = float("-inf")  # when the avatar's audio track was last audible

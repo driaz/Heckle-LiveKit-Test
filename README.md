@@ -16,7 +16,7 @@ Each connect is one run and one Runway session. Disconnect and reconnect to run 
 
 A throwaway test of the Heckle v2 narrator stack, to measure event-to-voice lag:
 
-fake game event → Claude Opus 5.5 → ElevenLabs v4 Turbo → Runway Characters avatar (preset `game-character`)
+fake game event → Claude Opus 5.5 → ElevenLabs v4 Turbo → Runway Characters avatar (preset `cat-character`, the cat)
 
 There is no speech-to-text and no player mic. `agent.py` waits for a participant, starts the avatar,
 then fires 20 scripted events through `generate_reply`. The next event fires 2 s after the avatar
