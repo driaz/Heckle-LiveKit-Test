@@ -2,14 +2,15 @@
 
 ## Your steps
 
-1. Make sure the worker is running (see "Run the worker") and has logged `registered worker`.
-2. Open <https://agents-playground.livekit.io>, sign in with your LiveKit Cloud account and pick the
-   same project the worker's `LIVEKIT_URL` points at.
-3. Click **Connect**. Leave the mic off; the narrator doesn't listen.
-4. The avatar appears after a few seconds, then heckles a fake event every ~10 s for about 2 minutes.
-5. Read the summary table in the worker's log when it finishes (or when you disconnect).
+The worker is deployed to LiveKit Cloud, so there is nothing to start. From your phone:
 
-Each connect is one run and one Runway session. Reconnect to run again.
+1. Open <https://agents-playground.livekit.io> in the browser and sign in with your LiveKit Cloud account.
+2. Pick the `heckle-o2pxy34d` project and tap **Connect**. Mute the mic; the narrator doesn't listen.
+3. The avatar appears after a few seconds (longer on a cold start), then heckles a fake event every
+   ~10 s for about 2 minutes.
+4. The summary table is in the agent's logs, not on the phone: run `lk agent logs` afterwards.
+
+Each connect is one run and one Runway session. Disconnect and reconnect to run again.
 
 ## What this is
 
@@ -34,7 +35,46 @@ are not included.
 Runway caps sessions at 5 minutes: the script takes about 2 minutes and the session is created with
 `max_duration=240` as a hard stop.
 
-## Run the worker
+## Deploy
+
+The agent runs on LiveKit Cloud (agent `CA_mGXcTcrKJGPB`, region `us-east`), configured by
+`livekit.toml` and the `Dockerfile`. The `lk` CLI reads `LIVEKIT_URL`, `LIVEKIT_API_KEY` and
+`LIVEKIT_API_SECRET` from the environment. Run these from the repo root.
+
+Redeploy after a code change:
+
+```bash
+lk agent deploy
+```
+
+Check that it is running, and read its logs (including the summary table):
+
+```bash
+lk agent status
+```
+
+```bash
+lk agent logs
+```
+
+Secrets live in LiveKit Cloud, never in the repo. To change one:
+
+```bash
+lk agent update-secrets --secrets "ELEVENLABS_API_KEY=<value>"
+```
+
+| Secret | Used by |
+| --- | --- |
+| `HECKLE_ANTHROPIC_API_KEY` | passed to the Anthropic plugin as `api_key=` |
+| `ELEVENLABS_API_KEY` | passed to the ElevenLabs plugin as `api_key=` (its own default name is `ELEVEN_API_KEY`) |
+| `RUNWAYML_API_SECRET` | read by the Runway plugin directly |
+
+`LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` are injected by LiveKit Cloud.
+
+## Run locally instead
+
+Needs the six variables above in your shell and a network that allows WebRTC. Stop the cloud agent
+first or both will compete for the same rooms.
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -43,15 +83,3 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```bash
 .venv/bin/python agent.py dev
 ```
-
-Environment variables:
-
-| Variable | Used by |
-| --- | --- |
-| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | worker, and the Runway plugin to let the avatar join |
-| `HECKLE_ANTHROPIC_API_KEY` | passed to the Anthropic plugin as `api_key=` |
-| `ELEVENLABS_API_KEY` | passed to the ElevenLabs plugin as `api_key=` (its own default name is `ELEVEN_API_KEY`) |
-| `RUNWAYML_API_SECRET` | read by the Runway plugin directly |
-
-Network: the worker needs the LiveKit project host, `api.anthropic.com`, `api.elevenlabs.io` and
-`api.dev.runwayml.com`.
