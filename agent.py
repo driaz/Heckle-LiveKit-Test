@@ -5,7 +5,9 @@ Throwaway. Measures how long after a game event the narrator starts talking.
 
 import asyncio
 import logging
+import math
 import os
+import statistics
 import time
 
 from livekit import rtc
@@ -28,13 +30,29 @@ EVENTS = [
     "finally cleared the first gap, then fell in the second",
     "stood still for 20 seconds doing nothing",
     "died within two seconds of respawning",
+    "ran the wrong way for a full minute",
+    "bounced off the same spring into the same ceiling",
+    "fell through a gap one tile wide",
+    "used the only extra life in the tutorial",
+    "hit the checkpoint, then walked back into the lava",
+    "tried to jump on a spike to see what happens",
+    "let the timer run out one step from the exit",
+    "celebrated early and fell off the victory platform",
 ]
-EVENT_INTERVAL_S = 10
-# Runway caps sessions at 5 minutes. 12 events x 10 s is ~2 minutes; this is the hard stop.
+# Runway caps a session at 5 minutes and one event takes ~13 s, so 20 events don't fit safely in
+# one. Each viewer connection runs two back-to-back avatar sessions of 10 events.
+EVENTS_PER_AVATAR_SESSION = 10
 AVATAR_MAX_DURATION_S = 240
 AVATAR_READY_TIMEOUT_S = 60
-# int16 peak above which the avatar's audio track counts as "speaking"
+# The next event fires this long after the avatar goes quiet.
+GAP_AFTER_SPEECH_S = 2.0
+# int16 peak above which a frame of the avatar's audio track counts as speech
 VOICE_PEAK_THRESHOLD = 1000
+# A reply's voice starts at the first loud frame that follows at least this much quiet.
+VOICE_ONSET_SILENCE_S = 0.3
+# The avatar can't voice a reply sooner than this after TTS produced its first audio.
+MIN_TTS_TO_VOICE_S = 0.1
+COLUMNS = ("llm", "tts", "voice")
 
 INSTRUCTIONS = (
     "You are the narrator of a platformer game, and you are sarcastic and merciless. "
@@ -65,44 +83,69 @@ class Narrator(Agent):
             yield frame
 
 
-def summary_table(rows: list[dict], avatar_startup_s: float | None) -> str:
-    def ms(row: dict, key: str) -> str:
-        return f"{(row[key] - row['fired']) * 1000:.0f}" if key in row else "-"
+def offset_ms(row: dict, key: str) -> float | None:
+    return (row[key] - row["fired"]) * 1000 if key in row else None
 
-    def avg(key: str) -> str:
-        vals = [(r[key] - r["fired"]) * 1000 for r in rows if key in r]
-        return f"{sum(vals) / len(vals):.0f}" if vals else "-"
 
-    head = f"{'#':>2}  {'event':<52} {'LLM ms':>7} {'TTS ms':>7} {'voice ms':>8}"
+def distrust(row: dict) -> str | None:
+    """Why this row's avatar voice time can't be trusted, or None if it can."""
+    if "voice" not in row:
+        return "no avatar voice detected"
+    if row.get("audio_at_fire"):
+        return "avatar audio still playing when the event fired"
+    if "tts" not in row or row["voice"] - row["tts"] < MIN_TTS_TO_VOICE_S:
+        return "avatar voice earlier than TTS allows"
+    return None
+
+
+def summary_table(rows: list[dict], avatar_startups: list[float]) -> str:
+    def cell(value: float | None) -> str:
+        return "-" if value is None else f"{value:.0f}"
+
+    head = f"{'#':>2}  {'event':<50} {'LLM ms':>7} {'TTS ms':>7} {'voice ms':>9}"
+    rule = "-" * len(head)
     lines = [
         "",
-        "Milliseconds after the event fired: LLM first token, TTS first audio frame,",
-        "first audible audio on the avatar's track (what a viewer hears, lip-synced).",
+        "SUMMARY. Milliseconds after the event fired: LLM first token, TTS first audio frame,",
+        "first avatar audio (what a viewer hears, lip-synced). * = voice time not trusted.",
         head,
-        "-" * len(head),
+        rule,
     ]
+    notes = []
     for i, r in enumerate(rows, 1):
-        lines.append(
-            f"{i:>2}  {r['event'][:52]:<52} {ms(r, 'llm'):>7} {ms(r, 'tts'):>7} {ms(r, 'voice'):>8}"
+        reason = distrust(r)
+        if reason:
+            notes.append(f"* row {i}: {reason}; left out of the voice stats")
+        voice = cell(offset_ms(r, "voice")) + ("*" if reason else " ")
+        llm, tts = cell(offset_ms(r, "llm")), cell(offset_ms(r, "tts"))
+        lines.append(f"{i:>2}  {r['event'][:50]:<50} {llm:>7} {tts:>7} {voice:>9}")
+    lines.append(rule)
+
+    values = {
+        key: sorted(
+            v
+            for r in rows
+            if (v := offset_ms(r, key)) is not None and not (key == "voice" and distrust(r))
         )
-    lines.append("-" * len(head))
-    lines.append(f"{'':>2}  {'mean':<52} {avg('llm'):>7} {avg('tts'):>7} {avg('voice'):>8}")
-    if avatar_startup_s is not None:
-        lines.append(f"Avatar first video frame: {avatar_startup_s:.1f} s after avatar start")
+        for key in COLUMNS
+    }
+    stats = {
+        "median": lambda v: statistics.median(v),
+        "p90 (nearest rank)": lambda v: v[math.ceil(0.9 * len(v)) - 1],
+        "max": lambda v: v[-1],
+        "rows counted": lambda v: len(v),
+    }
+    for name, fn in stats.items():
+        llm, tts, voice = (cell(fn(values[k])) if values[k] else "-" for k in COLUMNS)
+        lines.append(f"{'':>2}  {name:<50} {llm:>7} {tts:>7} {voice + ' ':>9}")
+    lines += notes
+    for n, startup in enumerate(avatar_startups, 1):
+        lines.append(f"Avatar session {n}: first video frame {startup:.1f} s after avatar start")
     return "\n".join(lines)
 
 
-async def entrypoint(ctx: JobContext) -> None:
-    await ctx.connect()
-    participant = await ctx.wait_for_participant()
-    logger.info("participant %s joined, starting avatar", participant.identity)
-
-    narrator = Narrator()
-    rows: list[dict] = []
-    avatar_video_at: asyncio.Future[float] = asyncio.get_running_loop().create_future()
-    watchers: set[asyncio.Task] = set()
-
-    session = AgentSession(
+def new_agent_session() -> AgentSession:
+    return AgentSession(
         llm=anthropic.LLM(
             model="claude-opus-5-5",
             api_key=os.environ["HECKLE_ANTHROPIC_API_KEY"],
@@ -112,8 +155,19 @@ async def entrypoint(ctx: JobContext) -> None:
             api_key=os.environ["ELEVENLABS_API_KEY"],  # plugin's own default is ELEVEN_API_KEY
         ),
     )
+
+
+async def run_avatar_session(
+    ctx: JobContext, events: list[str], rows: list[dict], avatar_startups: list[float]
+) -> None:
+    """One Runway session: start the avatar, fire `events`, close it again."""
+    narrator = Narrator()
+    session = new_agent_session()
     # reads RUNWAYML_API_SECRET and LIVEKIT_* from the environment
     avatar = runway.AvatarSession(preset_id="game-character", max_duration=AVATAR_MAX_DURATION_S)
+    avatar_video_at: asyncio.Future[float] = asyncio.get_running_loop().create_future()
+    watchers: set[asyncio.Task] = set()
+    last_loud = float("-inf")  # when the avatar's audio track was last audible
 
     async def watch_video(track: rtc.Track) -> None:
         stream = rtc.VideoStream(track)
@@ -124,14 +178,19 @@ async def entrypoint(ctx: JobContext) -> None:
         await stream.aclose()
 
     async def watch_audio(track: rtc.Track) -> None:
+        nonlocal last_loud
         async for ev in rtc.AudioStream(track):
-            cur = narrator.current
-            if cur is None or "voice" in cur:
+            if max(map(abs, ev.frame.data)) <= VOICE_PEAK_THRESHOLD:
                 continue
-            if max(map(abs, ev.frame.data)) > VOICE_PEAK_THRESHOLD:
-                cur["voice"] = time.perf_counter()
+            now = time.perf_counter()
+            quiet_before = now - last_loud >= VOICE_ONSET_SILENCE_S
+            last_loud = now
+            cur = narrator.current
+            # Leftover audio from the previous line is continuous, so it never follows quiet;
+            # and nothing before this event's TTS audio can be this event's reply.
+            if cur is not None and "voice" not in cur and "tts" in cur and quiet_before:
+                cur["voice"] = now
 
-    @ctx.room.on("track_subscribed")
     def on_track(track: rtc.Track, pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant):
         if p.identity != avatar.avatar_identity:
             return
@@ -140,49 +199,89 @@ async def entrypoint(ctx: JobContext) -> None:
         watchers.add(task)
         task.add_done_callback(watchers.discard)
 
-    avatar_started = time.perf_counter()
-    await avatar.start(session, room=ctx.room)
-    await session.start(
-        agent=narrator,
-        room=ctx.room,
-        # no mic, no STT, no chat input; the avatar publishes the audio, not the agent
-        room_options=room_io.RoomOptions(audio_input=False, text_input=False, audio_output=False),
-    )
+    async def wait_until(condition, timeout: float) -> bool:
+        deadline = time.perf_counter() + timeout
+        while not condition():
+            if time.perf_counter() > deadline:
+                return False
+            await asyncio.sleep(0.05)
+        return True
 
-    avatar_startup_s: float | None = None
+    ctx.room.on("track_subscribed", on_track)
     try:
-        first_frame = await asyncio.wait_for(avatar_video_at, AVATAR_READY_TIMEOUT_S)
-        avatar_startup_s = first_frame - avatar_started
-        logger.info("avatar first video frame after %.1f s", avatar_startup_s)
-    except asyncio.TimeoutError:
-        logger.warning("no avatar video after %d s, firing events anyway", AVATAR_READY_TIMEOUT_S)
+        avatar_started = time.perf_counter()
+        await avatar.start(session, room=ctx.room)
+        await session.start(
+            agent=narrator,
+            room=ctx.room,
+            # no mic, no STT, no chat input; the avatar publishes the audio, not the agent
+            room_options=room_io.RoomOptions(
+                audio_input=False, text_input=False, audio_output=False
+            ),
+        )
+        try:
+            first_frame = await asyncio.wait_for(avatar_video_at, AVATAR_READY_TIMEOUT_S)
+            avatar_startups.append(first_frame - avatar_started)
+            logger.info("avatar first video frame after %.1f s", avatar_startups[-1])
+        except asyncio.TimeoutError:
+            logger.warning("no avatar video after %d s, firing anyway", AVATAR_READY_TIMEOUT_S)
 
+        for event in events:
+            now = time.perf_counter()
+            row = {
+                "event": event,
+                "fired": now,
+                "audio_at_fire": now - last_loud < VOICE_ONSET_SILENCE_S,
+            }
+            rows.append(row)
+            narrator.current = row
+            logger.info("event %d/%d fired: %s", len(rows), len(EVENTS), event)
+            await session.generate_reply(user_input=f"The player {event}.")
+            # The avatar lags the agent's own idea of playout, so pace off its audio track:
+            # wait for the reply to be heard, then for the avatar to stay quiet for the gap.
+            await wait_until(lambda: "voice" in row, timeout=5)
+            await wait_until(
+                lambda: time.perf_counter() - last_loud >= GAP_AFTER_SPEECH_S, timeout=30
+            )
+            logger.info(
+                "event %d: llm +%s ms, tts +%s ms, avatar voice +%s ms%s",
+                len(rows),
+                *(f"{v:.0f}" if (v := offset_ms(row, k)) is not None else "-" for k in COLUMNS),
+                f" (not trusted: {reason})" if (reason := distrust(row)) else "",
+            )
+    finally:
+        narrator.current = None
+        ctx.room.off("track_subscribed", on_track)
+        await session.aclose()
+        await avatar.aclose()  # ends the Runway session
+        for task in watchers:
+            task.cancel()
+    # the next avatar session reuses the identity, so let this one leave the room first
+    await wait_until(lambda: avatar.avatar_identity not in ctx.room.remote_participants, 20)
+
+
+async def entrypoint(ctx: JobContext) -> None:
+    await ctx.connect()
+    participant = await ctx.wait_for_participant()
+    logger.info("participant %s joined, starting avatar", participant.identity)
+
+    rows: list[dict] = []
+    avatar_startups: list[float] = []
     printed = False
 
     async def print_summary() -> None:
         nonlocal printed
         if not printed and rows:
             printed = True
-            logger.info(summary_table(rows, avatar_startup_s))
+            logger.info(summary_table(rows, avatar_startups))
 
     ctx.add_shutdown_callback(print_summary)  # also covers the viewer leaving early
 
-    for i, event in enumerate(EVENTS, 1):
-        row = {"event": event, "fired": time.perf_counter()}
-        rows.append(row)
-        narrator.current = row
-        logger.info("event %d/%d fired: %s", i, len(EVENTS), event)
-        await session.generate_reply(user_input=f"The player {event}.")
-        logger.info(
-            "event %d: llm +%s ms, tts +%s ms, avatar voice +%s ms",
-            i,
-            *(f"{(row[k] - row['fired']) * 1000:.0f}" if k in row else "-" for k in ("llm", "tts", "voice")),
-        )
-        await asyncio.sleep(max(0.0, EVENT_INTERVAL_S - (time.perf_counter() - row["fired"])))
+    for start in range(0, len(EVENTS), EVENTS_PER_AVATAR_SESSION):
+        batch = EVENTS[start : start + EVENTS_PER_AVATAR_SESSION]
+        await run_avatar_session(ctx, batch, rows, avatar_startups)
 
-    narrator.current = None
     await print_summary()
-    await session.aclose()  # also ends the Runway session
     ctx.shutdown("script finished")
 
 

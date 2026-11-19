@@ -6,11 +6,12 @@ The worker is deployed to LiveKit Cloud, so there is nothing to start. From your
 
 1. Open <https://agents-playground.livekit.io> in the browser and sign in with your LiveKit Cloud account.
 2. Pick the `heckle-o2pxy34d` project and tap **Connect**. Mute the mic; the narrator doesn't listen.
-3. The avatar appears after a few seconds (longer on a cold start), then heckles a fake event every
-   ~10 s for about 2 minutes.
+3. The avatar appears after a few seconds (longer on a cold start) and heckles 10 fake events. It
+   then leaves and comes back for 10 more; stay connected through the swap. A run takes about
+   5 minutes.
 4. The summary table is in the agent's logs, not on the phone: run `lk agent logs` afterwards.
 
-Each connect is one run and one Runway session. Disconnect and reconnect to run again.
+Each connect is one run and two Runway sessions. Disconnect and reconnect to run again.
 
 ## What this is
 
@@ -19,7 +20,9 @@ A throwaway test of the Heckle v2 narrator stack, to measure event-to-voice lag:
 fake game event → Claude Opus 5.5 → ElevenLabs v4 Turbo → Runway Characters avatar (preset `game-character`)
 
 There is no speech-to-text and no player mic. `agent.py` waits for a participant, starts the avatar,
-then fires 12 scripted events through `generate_reply`. Per event it logs, in ms after the event fired:
+then fires 20 scripted events through `generate_reply`. The next event fires 2 s after the avatar
+stops speaking, so the narrator never talks over itself. Per event it logs, in ms after the event
+fired:
 
 | Column | Meaning |
 | --- | --- |
@@ -32,8 +35,12 @@ subscribing to the avatar's audio track (the avatar publishes audio and video in
 the avatar's first video frame is reported once per session. Viewer-side network and playout delay
 are not included.
 
-Runway caps sessions at 5 minutes: the script takes about 2 minutes and the session is created with
-`max_duration=240` as a hard stop.
+The summary gives median, p90 and max per column. A reply's voice time only counts if the avatar's
+audio starts after a stretch of quiet and after that reply's TTS audio exists; rows that fail this
+are marked `*` with the reason and left out of the voice stats.
+
+Runway caps sessions at 5 minutes and 20 events take about 4.5, so each run uses two avatar sessions
+of 10 events, each created with `max_duration=240` as a hard stop.
 
 ## Deploy
 
