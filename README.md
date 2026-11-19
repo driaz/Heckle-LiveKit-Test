@@ -1,62 +1,61 @@
-# Heckle v2 latency rig
+# Heckle v2 narrator agent
 
-## Your steps
+The narrator for [Heckle](https://github.com/driaz/Heckle), running as a LiveKit agent:
 
-Testing is finished and the LiveKit Cloud agent has been deleted. To run again, deploy it first
-(see "Deploy"). Then, from your phone:
+game event → Claude Opus 5.5 → ElevenLabs v4 Turbo → Runway Characters avatar (preset `cat-character`, the cat)
 
-1. Open <https://agents-playground.livekit.io> in the browser and sign in with your LiveKit Cloud account.
-2. Pick the `heckle-o2pxy34d` project and tap **Connect**. Mute the mic; the narrator doesn't listen.
-3. The avatar appears after a few seconds (longer on a cold start) and heckles 20 fake events. Stay
-   connected until it leaves, about 4.5 minutes.
-4. The summary table is in the agent's logs, not on the phone: run `lk agent logs` afterwards.
+This repo started as a latency rig that fired 20 scripted events. Those results are in
+[RESULTS.md](RESULTS.md). The agent now takes real events from the game instead.
 
-Each connect is one run and one Runway session. Disconnect and reconnect to run again.
+## How it works
 
-## What this is
+The game joins a new LiveKit room on page load. LiveKit dispatches this agent to the room; it
+starts the avatar straight away (about 6 seconds to the first video frame) and then waits for
+events. There is no speech-to-text and no player mic.
 
-Results and lessons from the test runs are in [RESULTS.md](RESULTS.md).
+Events are short JSON messages on the data topic `heckle.event`, sent by the player:
 
-A throwaway test of the Heckle v2 narrator stack, to measure event-to-voice lag:
-
-fake game event → Claude Opus 5.5 → ElevenLabs v4 Turbo → Runway Characters avatar (preset `cat-character`, the cat)
-
-There is no speech-to-text and no player mic. `agent.py` waits for a participant, starts the avatar,
-then fires 20 scripted events through `generate_reply`. The next event fires 2 s after the avatar
-stops speaking, so the narrator never talks over itself. Per event it logs, in ms after the event
-fired:
-
-| Column | Meaning |
+| Event | Example |
 | --- | --- |
-| LLM ms | first token from Claude |
-| TTS ms | first audio frame from ElevenLabs |
-| voice ms | first audible audio on the avatar's published track, which is what a viewer hears |
+| Death | `{"t":"death","cause":"fall","at":"The Wobbly Bridge","n":4,"here":3,"gap":2.1}` |
+| Stall | `{"t":"stall","at":"Start Island","secs":23}` |
+| Checkpoint | `{"t":"checkpoint","name":"Crystal Gauntlet","n":3,"secs":95}` |
+| Finish | `{"t":"finish","n":12,"secs":301,"stars":"7/10"}` |
 
-The Runway plugin exposes no per-utterance video event, so "voice ms" is measured by the worker
-subscribing to the avatar's audio track (the avatar publishes audio and video in sync). The time to
-the avatar's first video frame is reported once per session. Viewer-side network and playout delay
-are not included.
+`cause` is `fall` or a hazard's name, `n` is deaths so far, `here` is deaths in that area, and
+`gap` is the seconds since the previous death when it was under 5. Every field except `t` is
+optional. Messages over 512 bytes or of an unknown kind are ignored.
 
-The summary gives median, p90 and max per column. A reply's voice time only counts if the avatar's
-audio starts after a stretch of quiet and after that reply's TTS audio exists; rows that fail this
-are marked `*` with the reason and left out of the voice stats.
+The level description (each area's name and what it is) arrives once, in the player's participant
+metadata, which the game's token endpoint sets. It is appended to the narrator's instructions.
 
-Runway caps sessions at 5 minutes. 20 events take about 4 (roughly 12 s each), so they run in one
-session created with `max_duration=295`. No new event fires after 270 s, so a slow run reports fewer
-events instead of having a reply cut off.
+### Not talking over itself
+
+The agent answers one batch at a time. It starts the next reply only after the avatar's audio
+track has been quiet for 1 second. Events that arrive in the meantime wait in an inbox that keeps
+at most one event per kind:
+
+- a newer event replaces an older one of the same kind; deaths keep a count ("died 3 times in a row")
+- any newer event cancels a waiting stall
+- deaths and stalls that have waited more than 15 seconds are dropped; checkpoints and the finish
+  are kept
+
+Whatever is left becomes a single reply.
+
+### Session length
+
+Runway caps a session at 5 minutes. No reply starts after 270 seconds; the agent then ends the
+Runway session and leaves, and the game joins a fresh room for a new session. The agent also
+leaves as soon as the player does.
+
+Per reply the agent logs, in ms after it started on the batch: first token from Claude, first
+audio from ElevenLabs, and first audible audio on the avatar's track.
 
 ## Deploy
 
-The agent ran on LiveKit Cloud in region `us-east`, built from the `Dockerfile`. The agent ID in
-`livekit.toml` (`CA_mGXcTcrKJGPB`) was deleted after testing, so create a new one first; this
-rewrites `livekit.toml`:
-
-```bash
-lk agent create --region us-east --secrets-file <file with the three secrets below>
-```
-
-The `lk` CLI reads `LIVEKIT_URL`, `LIVEKIT_API_KEY` and
-`LIVEKIT_API_SECRET` from the environment. Run these from the repo root.
+The agent runs on LiveKit Cloud in region `us-east`, built from the `Dockerfile`. `livekit.toml`
+holds the project and agent ID. Run these from the repo root; the `lk` CLI reads `LIVEKIT_URL`,
+`LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` from the environment.
 
 Redeploy after a code change:
 
@@ -64,7 +63,7 @@ Redeploy after a code change:
 lk agent deploy
 ```
 
-Check that it is running, and read its logs (including the summary table):
+Check that it is running, and read its logs:
 
 ```bash
 lk agent status
@@ -72,6 +71,12 @@ lk agent status
 
 ```bash
 lk agent logs
+```
+
+If the agent has been deleted, create a new one; this rewrites `livekit.toml`:
+
+```bash
+lk agent create --region us-east --secrets-file <file with the three secrets below>
 ```
 
 Secrets live in LiveKit Cloud, never in the repo. To change one:
@@ -87,6 +92,9 @@ lk agent update-secrets --secrets "ELEVENLABS_API_KEY=<value>"
 | `RUNWAYML_API_SECRET` | read by the Runway plugin directly |
 
 `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` are injected by LiveKit Cloud.
+
+The agent has no dispatch name, so it joins every new room in the project, and each room with a
+player in it starts a Runway session. Delete the agent (`lk agent delete`) when you are not using it.
 
 ## Run locally instead
 
