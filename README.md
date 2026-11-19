@@ -15,6 +15,8 @@ Each connect is one run and one Runway session. Disconnect and reconnect to run 
 
 ## What this is
 
+Results and lessons from the test runs are in [RESULTS.md](RESULTS.md).
+
 A throwaway test of the Heckle v2 narrator stack, to measure event-to-voice lag:
 
 fake game event → Claude Opus 5.5 → ElevenLabs v4 Turbo → Runway Characters avatar (preset `cat-character`, the cat)
