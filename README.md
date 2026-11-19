@@ -52,7 +52,8 @@ rewrites `livekit.toml`:
 ```bash
 lk agent create --region us-east --secrets-file <file with the three secrets below>
 ```
- The `lk` CLI reads `LIVEKIT_URL`, `LIVEKIT_API_KEY` and
+
+The `lk` CLI reads `LIVEKIT_URL`, `LIVEKIT_API_KEY` and
 `LIVEKIT_API_SECRET` from the environment. Run these from the repo root.
 
 Redeploy after a code change:
