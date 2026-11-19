@@ -6,12 +6,11 @@ The worker is deployed to LiveKit Cloud, so there is nothing to start. From your
 
 1. Open <https://agents-playground.livekit.io> in the browser and sign in with your LiveKit Cloud account.
 2. Pick the `heckle-o2pxy34d` project and tap **Connect**. Mute the mic; the narrator doesn't listen.
-3. The avatar appears after a few seconds (longer on a cold start) and heckles 10 fake events. It
-   then leaves and comes back for 10 more; stay connected through the swap. A run takes about
-   5 minutes.
+3. The avatar appears after a few seconds (longer on a cold start) and heckles 20 fake events. Stay
+   connected until it leaves, about 4.5 minutes.
 4. The summary table is in the agent's logs, not on the phone: run `lk agent logs` afterwards.
 
-Each connect is one run and two Runway sessions. Disconnect and reconnect to run again.
+Each connect is one run and one Runway session. Disconnect and reconnect to run again.
 
 ## What this is
 
@@ -39,8 +38,9 @@ The summary gives median, p90 and max per column. A reply's voice time only coun
 audio starts after a stretch of quiet and after that reply's TTS audio exists; rows that fail this
 are marked `*` with the reason and left out of the voice stats.
 
-Runway caps sessions at 5 minutes and 20 events take about 4.5, so each run uses two avatar sessions
-of 10 events, each created with `max_duration=240` as a hard stop.
+Runway caps sessions at 5 minutes. 20 events take about 4 (roughly 12 s each), so they run in one
+session created with `max_duration=295`. No new event fires after 270 s, so a slow run reports fewer
+events instead of having a reply cut off.
 
 ## Deploy
 

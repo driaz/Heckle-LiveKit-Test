@@ -39,10 +39,10 @@ EVENTS = [
     "let the timer run out one step from the exit",
     "celebrated early and fell off the victory platform",
 ]
-# Runway caps a session at 5 minutes and one event takes ~13 s, so 20 events don't fit safely in
-# one. Each viewer connection runs two back-to-back avatar sessions of 10 events.
-EVENTS_PER_AVATAR_SESSION = 10
-AVATAR_MAX_DURATION_S = 240
+# Runway caps a session at 5 minutes. 20 events take about 4 (measured: ~12 s each), so they run in
+# one avatar session; no new event fires after the budget, so a reply is never cut off by the cap.
+AVATAR_MAX_DURATION_S = 295
+EVENT_BUDGET_S = 270
 AVATAR_READY_TIMEOUT_S = 60
 # The next event fires this long after the avatar goes quiet.
 GAP_AFTER_SPEECH_S = 2.0
@@ -98,7 +98,7 @@ def distrust(row: dict) -> str | None:
     return None
 
 
-def summary_table(rows: list[dict], avatar_startups: list[float]) -> str:
+def summary_table(rows: list[dict], avatar_startup_s: float | None) -> str:
     def cell(value: float | None) -> str:
         return "-" if value is None else f"{value:.0f}"
 
@@ -139,8 +139,10 @@ def summary_table(rows: list[dict], avatar_startups: list[float]) -> str:
         llm, tts, voice = (cell(fn(values[k])) if values[k] else "-" for k in COLUMNS)
         lines.append(f"{'':>2}  {name:<50} {llm:>7} {tts:>7} {voice + ' ':>9}")
     lines += notes
-    for n, startup in enumerate(avatar_startups, 1):
-        lines.append(f"Avatar session {n}: first video frame {startup:.1f} s after avatar start")
+    if len(rows) < len(EVENTS):
+        lines.append(f"Only {len(rows)} of {len(EVENTS)} events fired")
+    if avatar_startup_s is not None:
+        lines.append(f"Avatar first video frame: {avatar_startup_s:.1f} s after avatar start")
     return "\n".join(lines)
 
 
@@ -157,10 +159,23 @@ def new_agent_session() -> AgentSession:
     )
 
 
-async def run_avatar_session(
-    ctx: JobContext, events: list[str], rows: list[dict], avatar_startups: list[float]
-) -> None:
-    """One Runway session: start the avatar, fire `events`, close it again."""
+async def entrypoint(ctx: JobContext) -> None:
+    await ctx.connect()
+    participant = await ctx.wait_for_participant()
+    logger.info("participant %s joined, starting avatar", participant.identity)
+
+    rows: list[dict] = []
+    avatar_startup_s: float | None = None
+    printed = False
+
+    async def print_summary() -> None:
+        nonlocal printed
+        if not printed and rows:
+            printed = True
+            logger.info(summary_table(rows, avatar_startup_s))
+
+    ctx.add_shutdown_callback(print_summary)  # also covers the viewer leaving early
+
     narrator = Narrator()
     session = new_agent_session()
     # reads RUNWAYML_API_SECRET and LIVEKIT_* from the environment
@@ -221,13 +236,16 @@ async def run_avatar_session(
         )
         try:
             first_frame = await asyncio.wait_for(avatar_video_at, AVATAR_READY_TIMEOUT_S)
-            avatar_startups.append(first_frame - avatar_started)
-            logger.info("avatar first video frame after %.1f s", avatar_startups[-1])
+            avatar_startup_s = first_frame - avatar_started
+            logger.info("avatar first video frame after %.1f s", avatar_startup_s)
         except asyncio.TimeoutError:
             logger.warning("no avatar video after %d s, firing anyway", AVATAR_READY_TIMEOUT_S)
 
-        for event in events:
+        for event in EVENTS:
             now = time.perf_counter()
+            if now - avatar_started > EVENT_BUDGET_S:
+                logger.warning("out of session time, stopping after %d events", len(rows))
+                break
             row = {
                 "event": event,
                 "fired": now,
@@ -249,39 +267,16 @@ async def run_avatar_session(
                 *(f"{v:.0f}" if (v := offset_ms(row, k)) is not None else "-" for k in COLUMNS),
                 f" (not trusted: {reason})" if (reason := distrust(row)) else "",
             )
+    except RuntimeError as e:
+        # generate_reply raises this once the viewer has left and the session has closed
+        logger.warning("run ended early: %s", e)
     finally:
         narrator.current = None
-        ctx.room.off("track_subscribed", on_track)
+        await print_summary()
         await session.aclose()
         await avatar.aclose()  # ends the Runway session
         for task in watchers:
             task.cancel()
-    # the next avatar session reuses the identity, so let this one leave the room first
-    await wait_until(lambda: avatar.avatar_identity not in ctx.room.remote_participants, 20)
-
-
-async def entrypoint(ctx: JobContext) -> None:
-    await ctx.connect()
-    participant = await ctx.wait_for_participant()
-    logger.info("participant %s joined, starting avatar", participant.identity)
-
-    rows: list[dict] = []
-    avatar_startups: list[float] = []
-    printed = False
-
-    async def print_summary() -> None:
-        nonlocal printed
-        if not printed and rows:
-            printed = True
-            logger.info(summary_table(rows, avatar_startups))
-
-    ctx.add_shutdown_callback(print_summary)  # also covers the viewer leaving early
-
-    for start in range(0, len(EVENTS), EVENTS_PER_AVATAR_SESSION):
-        batch = EVENTS[start : start + EVENTS_PER_AVATAR_SESSION]
-        await run_avatar_session(ctx, batch, rows, avatar_startups)
-
-    await print_summary()
     ctx.shutdown("script finished")
 
 
