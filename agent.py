@@ -154,6 +154,7 @@ def new_agent_session() -> AgentSession:
         ),
         tts=elevenlabs.TTS(
             model="eleven_v4_turbo",
+            voice_id="E95b3lkMWHDsKeHJaIcY",
             api_key=os.environ["ELEVENLABS_API_KEY"],  # plugin's own default is ELEVEN_API_KEY
         ),
     )
