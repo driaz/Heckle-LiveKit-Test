@@ -41,7 +41,7 @@ Two earlier runs are not counted as baselines:
 
 - A 12-event run with timer pacing. Its voice detection was wrong for 9 of 12 events (see
   "Measuring voice"). It did show one 4.6 s first-token outlier from Claude; nothing like it
-  appeared in the later 49 events.
+  appeared in the 50 events measured afterwards.
 - A run that tried two back-to-back avatar sessions. The first 10 events were clean (voice median
   2339 ms), then the second avatar never appeared.
 
