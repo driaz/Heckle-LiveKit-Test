@@ -1,0 +1,4 @@
+livekit-agents~=1.8
+livekit-plugins-anthropic~=1.8
+livekit-plugins-elevenlabs~=1.8
+livekit-plugins-runway~=1.8
