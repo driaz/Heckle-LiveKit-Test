@@ -32,6 +32,9 @@ AVATAR_READY_TIMEOUT_S = 60
 GAP_AFTER_SPEECH_S = 1.0
 # Server-side voice detection ends the player's turn after this much silence.
 PLAYER_SILENCE_S = 0.6
+# The player must say at least this many words to take over from an event reply that isn't
+# audible yet. Shorter sounds ("Ah!", a yelp, a key clack) leave the reply alone.
+MIN_WORDS_TO_TAKE_OVER = 3
 # A death or stall still waiting after this long is old news and is dropped.
 STALE_AFTER_S = 15.0
 # int16 peak above which a frame of the avatar's audio track counts as speech
@@ -241,7 +244,7 @@ def new_agent_session() -> AgentSession:
             # The player can't cut the narrator off once it is audible, and the mic is ignored
             # while it speaks, so its own voice from the player's speakers is never transcribed.
             # (An event reply that isn't audible yet is the exception; see on_player_speech.)
-            "interruption": {"enabled": False},
+            "interruption": {"enabled": False, "min_words": MIN_WORDS_TO_TAKE_OVER},
         },
         tts=elevenlabs.TTS(
             model="eleven_v4_turbo",
@@ -360,7 +363,8 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         # The player's voice wins over an event reply that isn't audible yet: drop that reply and
         # answer the player. The event stays in the chat history, so the answer can still use it.
-        if event_reply_pending() and session.agent_state != "speaking":
+        enough_words = len(ev.transcript.split()) >= MIN_WORDS_TO_TAKE_OVER
+        if enough_words and event_reply_pending() and session.agent_state != "speaking":
             logger.info("player spoke; dropping the event reply in progress")
             event_reply.interrupt()
         if not ev.is_final:

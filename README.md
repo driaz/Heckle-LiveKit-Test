@@ -39,9 +39,10 @@ messages are prefixed with `[event]` so Claude can tell the two apart.
 
 The player's voice wins over events, and nothing is answered late:
 
-- If the player speaks while the narrator is still preparing an event reply (nothing audible
-  yet), that reply is dropped and the narrator answers the player instead. The event stays in
-  the chat history, so the answer can still refer to it.
+- If the player says three or more words while the narrator is still preparing an event reply
+  (nothing audible yet), that reply is dropped and the narrator answers the player instead. The
+  event stays in the chat history, so the answer can still refer to it. Shorter sounds, such as
+  "Ah!" on dying, leave the event reply alone.
 - Once the narrator is audible, the player cannot interrupt it, and mic audio is discarded until
   it finishes. That keeps the narrator's own voice, coming out of the player's speakers, from
   being transcribed and answered. What the player says over it is not answered afterwards.
