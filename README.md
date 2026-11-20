@@ -2,7 +2,9 @@
 
 The narrator for [Heckle](https://github.com/driaz/Heckle), running as a LiveKit agent:
 
-game event → Claude Opus 5.5 → ElevenLabs v4 Turbo → Runway Characters avatar (preset `cat-character`, the cat)
+game event or player speech → Claude Opus 5.5 → ElevenLabs v4 Turbo → Runway Characters avatar (preset `cat-character`, the cat)
+
+Player speech is transcribed by ElevenLabs Scribe v2 realtime, using the same ElevenLabs key.
 
 This repo started as a latency rig that fired 20 scripted events. Those results are in
 [RESULTS.md](RESULTS.md). The agent now takes real events from the game instead.
@@ -11,7 +13,7 @@ This repo started as a latency rig that fired 20 scripted events. Those results 
 
 The game joins a new LiveKit room on page load. LiveKit dispatches this agent to the room; it
 starts the avatar straight away (about 6 seconds to the first video frame) and then waits for
-events. There is no speech-to-text and no player mic.
+events and for the player to speak.
 
 Events are short JSON messages on the data topic `heckle.event`, sent by the player:
 
@@ -29,11 +31,22 @@ optional. Messages over 512 bytes or of an unknown kind are ignored.
 The level description (each area's name and what it is) arrives once, in the player's participant
 metadata, which the game's token endpoint sets. It is appended to the narrator's instructions.
 
+### Player speech
+
+The game publishes the player's mic. Scribe's server-side voice detection ends the player's turn
+after 0.6 seconds of silence, and the transcript goes to Claude as a normal user message. Event
+messages are prefixed with `[event]` so Claude can tell the two apart.
+
+The player cannot interrupt the narrator, and mic audio is discarded while the narrator is
+speaking. That keeps the narrator's own voice, coming out of the player's speakers, from being
+transcribed and answered.
+
 ### Not talking over itself
 
-The agent answers one batch at a time. It starts the next reply only after the avatar's audio
-track has been quiet for 1 second. Events that arrive in the meantime wait in an inbox that keeps
-at most one event per kind:
+The agent says one thing at a time. It starts a reply to events only when it is not thinking or
+speaking, the player is not mid-sentence, and the avatar's audio track has been quiet for
+1 second. Events that arrive in the meantime wait in an inbox that keeps at most one event per
+kind:
 
 - a newer event replaces an older one of the same kind; deaths keep a count ("died 3 times in a row")
 - any newer event cancels a waiting stall
@@ -48,8 +61,9 @@ Runway caps a session at 5 minutes. No reply starts after 270 seconds; the agent
 Runway session and leaves, and the game joins a fresh room for a new session. The agent also
 leaves as soon as the player does.
 
-Per reply the agent logs, in ms after it started on the batch: first token from Claude, first
-audio from ElevenLabs, and first audible audio on the avatar's track.
+Per reply the agent logs first token from Claude, first audio from ElevenLabs, and first audible
+audio on the avatar's track. For an event reply the times are in ms after it started on the
+batch; for a speech reply, after the final transcript arrived.
 
 ## Deploy
 

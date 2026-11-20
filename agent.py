@@ -1,8 +1,8 @@
-"""Heckle v2 narrator: game events over a LiveKit data channel -> Claude -> ElevenLabs -> Runway avatar.
+"""Heckle v2 narrator: game events and the player's voice -> Claude -> ElevenLabs -> Runway avatar.
 
-The game joins a room and publishes short JSON events on the "heckle.event" topic. The narrator
-answers one batch at a time; events that arrive while it is busy are merged or dropped (see Inbox),
-so it never talks over itself. No mic, no speech-to-text.
+The game joins a room and publishes short JSON events on the "heckle.event" topic, and the player's
+mic if they allow it. The narrator says one thing at a time: events that arrive while it is busy
+are merged or dropped (see Inbox), and it does not listen while it is speaking.
 """
 
 import asyncio
@@ -30,6 +30,8 @@ EVENT_BUDGET_S = 270
 AVATAR_READY_TIMEOUT_S = 60
 # The next reply may start once the avatar has been quiet for this long.
 GAP_AFTER_SPEECH_S = 1.0
+# Server-side voice detection ends the player's turn after this much silence.
+PLAYER_SILENCE_S = 0.6
 # A death or stall still waiting after this long is old news and is dropped.
 STALE_AFTER_S = 15.0
 # int16 peak above which a frame of the avatar's audio track counts as speech
@@ -39,11 +41,20 @@ VOICE_ONSET_SILENCE_S = 0.3
 
 INSTRUCTIONS = """You are the narrator of a 3D platformer called Heckle. You watch the player and heckle them live.
 
-Each message describes what the player just did. React to it.
-- ONE short sentence. Never two. Plain spoken text: no emoji, no stage directions, no markdown.
+Messages that start with [event] describe what the player just did. React to them.
+- ONE short sentence. Never two.
 - If a message lists several things, pick the funniest one or tie them together. Still one sentence.
 - Never be generic. Use the specific place, cause and numbers you are given.
-- Escalate gradually on repeated failures, and remember what happened earlier in the session.
+- Escalate gradually on repeated failures.
+
+Any other message is the player talking to you through their mic, as transcribed speech.
+- Answer what they actually said: clap back, banter. One or two short sentences.
+- Stay in character, and use what has happened in the game to roast harder.
+- The transcript can be wrong or pick up stray noise. If it makes no sense, mock the mumbling briefly.
+
+Always:
+- Plain spoken text: no emoji, no stage directions, no markdown, and never say "[event]".
+- Remember what happened earlier in the session and refer back to it.
 - Your tone is dry and unimpressed: a bored commentator who has seen it all, not a game show host.
 - When the player does well, sound reluctant, as if it pains you to admit it.
 - Never explain the game or give advice.
@@ -176,12 +187,20 @@ class Inbox:
             if ev["t"] not in ("death", "stall") or now - ev["_at"] <= STALE_AFTER_S
         ]
 
-    async def take(self, timeout: float) -> list[dict] | None:
-        """The next batch of events, or None once closed or after `timeout` seconds."""
+    async def take(self, timeout: float, ready=None) -> list[dict] | None:
+        """The next batch of events, or None once closed or after `timeout` seconds.
+
+        `ready` is awaited once there is something to say and before it is handed over, so events
+        keep merging until the narrator is actually free.
+        """
         deadline = self._clock() + timeout
         while not self._closed:
-            if batch := self._drain():
-                return batch
+            if self._items:
+                if ready is not None:
+                    await ready()
+                if batch := self._drain():
+                    return batch
+                continue
             self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), deadline - self._clock())
@@ -208,6 +227,19 @@ def new_agent_session() -> AgentSession:
             model="claude-opus-5-5",
             api_key=os.environ["HECKLE_ANTHROPIC_API_KEY"],
         ),
+        stt=elevenlabs.STT(
+            model="scribe_v2_realtime",
+            language_code="en",
+            server_vad={"vad_silence_threshold_secs": PLAYER_SILENCE_S},
+            api_key=os.environ["ELEVENLABS_API_KEY"],
+        ),
+        turn_handling={
+            # the STT's own voice detection decides when the player has finished
+            "turn_detection": "stt",
+            # The player can't cut the narrator off, and the mic is ignored while it speaks,
+            # so the narrator's own voice from the player's speakers is never transcribed.
+            "interruption": {"enabled": False},
+        },
         tts=elevenlabs.TTS(
             model="eleven_v4_turbo",
             voice_id="E95b3lkMWHDsKeHJaIcY",
@@ -277,6 +309,11 @@ async def entrypoint(ctx: JobContext) -> None:
             # and nothing before this reply's TTS audio can be this reply.
             if cur is not None and "voice" not in cur and "tts" in cur and quiet_before:
                 cur["voice"] = now
+                logger.info(
+                    "%s reply: llm +%.0f ms, tts +%.0f ms, avatar voice +%.0f ms",
+                    cur["to"],
+                    *((cur[k] - cur["fired"]) * 1000 for k in ("llm", "tts", "voice")),
+                )
 
     def on_track(track: rtc.Track, pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant):
         if p.identity != avatar.avatar_identity:
@@ -294,6 +331,25 @@ async def entrypoint(ctx: JobContext) -> None:
             await asyncio.sleep(0.05)
         return True
 
+    def on_player_speech(ev) -> None:
+        if not ev.is_final:
+            return
+        # Latency for speech is counted from the end of the player's turn.
+        narrator.current = {"to": "speech", "fired": time.perf_counter()}
+        logger.info("player said: %s", ev.transcript)
+
+    def narrator_free() -> bool:
+        return (
+            session.agent_state in ("listening", "idle")
+            and session.user_state != "speaking"
+            and time.perf_counter() - last_loud >= GAP_AFTER_SPEECH_S
+        )
+
+    async def until_narrator_free() -> None:
+        # The avatar lags the agent's own idea of playout, so this also watches its audio track.
+        await wait_until(narrator_free, timeout=30)
+
+    session.on("user_input_transcribed", on_player_speech)
     ctx.room.on("data_received", on_data)
     ctx.room.on("participant_disconnected", on_participant_left)
     ctx.room.on("track_subscribed", on_track)
@@ -304,9 +360,9 @@ async def entrypoint(ctx: JobContext) -> None:
         await session.start(
             agent=narrator,
             room=ctx.room,
-            # no mic, no STT, no chat input; the avatar publishes the audio, not the agent
+            # the player's mic in, no chat input; the avatar publishes the audio, not the agent
             room_options=room_io.RoomOptions(
-                audio_input=False, text_input=False, audio_output=False
+                audio_input=True, text_input=False, audio_output=False
             ),
         )
         try:
@@ -317,35 +373,23 @@ async def entrypoint(ctx: JobContext) -> None:
 
         while True:
             budget = EVENT_BUDGET_S - (time.perf_counter() - avatar_started)
-            batch = await inbox.take(budget) if budget > 0 else None
-            if batch is None:
+            batch = await inbox.take(budget, until_narrator_free) if budget > 0 else None
+            if batch is None or time.perf_counter() - avatar_started > EVENT_BUDGET_S:
                 break
-            prompt = " ".join(describe(ev) for ev in batch)
-            row = {"fired": time.perf_counter()}
+            prompt = "[event] " + " ".join(describe(ev) for ev in batch)
+            row = {"to": "event", "fired": time.perf_counter()}
             narrator.current = row
             replies += 1
             logger.info("reply %d to: %s", replies, prompt)
             await session.generate_reply(user_input=prompt)
-            # The avatar lags the agent's own idea of playout, so pace off its audio track:
-            # wait for the reply to be heard, then for the avatar to stay quiet for the gap.
+            # Give the avatar a moment to start voicing it, so the next check sees it speaking.
             await wait_until(lambda: "voice" in row, timeout=5)
-            await wait_until(
-                lambda: time.perf_counter() - last_loud >= GAP_AFTER_SPEECH_S, timeout=30
-            )
-            logger.info(
-                "reply %d: llm +%s ms, tts +%s ms, avatar voice +%s ms",
-                replies,
-                *(
-                    f"{(row[k] - row['fired']) * 1000:.0f}" if k in row else "-"
-                    for k in ("llm", "tts", "voice")
-                ),
-            )
     except RuntimeError as e:
         # generate_reply raises this once the player has left and the session has closed
         logger.warning("session ended early: %s", e)
     finally:
         narrator.current = None
-        logger.info("ending after %d replies", replies)
+        logger.info("ending after %d event replies", replies)
         await session.aclose()
         await avatar.aclose()  # ends the Runway session
         for task in watchers:
