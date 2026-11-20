@@ -236,6 +236,8 @@ def new_agent_session() -> AgentSession:
         turn_handling={
             # the STT's own voice detection decides when the player has finished
             "turn_detection": "stt",
+            # Scribe has already waited out the silence; don't wait again before answering.
+            "endpointing": {"min_delay": 0.0},
             # The player can't cut the narrator off once it is audible, and the mic is ignored
             # while it speaks, so its own voice from the player's speakers is never transcribed.
             # (An event reply that isn't audible yet is the exception; see on_player_speech.)
@@ -270,6 +272,16 @@ async def entrypoint(ctx: JobContext) -> None:
     avatar_video_at: asyncio.Future[float] = asyncio.get_running_loop().create_future()
     watchers: set[asyncio.Task] = set()
     last_loud = float("-inf")  # when the avatar's audio track was last audible
+    rows: list[dict] = []  # timings of replies whose voice hasn't been heard yet, oldest first
+
+    def start_timing(to: str) -> dict:
+        """Time a new reply. Claude and TTS stamp it via the narrator; the avatar's voice is
+        matched to it later, even if another reply has started being timed by then."""
+        row = {"to": to, "fired": time.perf_counter()}
+        narrator.current = row
+        rows.append(row)
+        del rows[:-8]  # replies that never reach TTS would otherwise pile up
+        return row
     inbox = Inbox()
 
     def on_data(packet: rtc.DataPacket) -> None:
@@ -305,16 +317,22 @@ async def entrypoint(ctx: JobContext) -> None:
             now = time.perf_counter()
             quiet_before = now - last_loud >= VOICE_ONSET_SILENCE_S
             last_loud = now
-            cur = narrator.current
-            # Leftover audio from the previous line is continuous, so it never follows quiet;
-            # and nothing before this reply's TTS audio can be this reply.
-            if cur is not None and "voice" not in cur and "tts" in cur and quiet_before:
-                cur["voice"] = now
-                logger.info(
-                    "%s reply: llm +%.0f ms, tts +%.0f ms, avatar voice +%.0f ms",
-                    cur["to"],
-                    *((cur[k] - cur["fired"]) * 1000 for k in ("llm", "tts", "voice")),
-                )
+            # Leftover audio from the previous line is continuous, so it never follows quiet.
+            # The voice belongs to the oldest reply whose TTS audio exists; replies before it
+            # were dropped or never spoken.
+            if not quiet_before:
+                continue
+            spoken = next((i for i, r in enumerate(rows) if "tts" in r), None)
+            if spoken is None:
+                continue
+            row = rows[spoken]
+            del rows[: spoken + 1]
+            row["voice"] = now
+            logger.info(
+                "%s reply: llm +%.0f ms, tts +%.0f ms, avatar voice +%.0f ms",
+                row["to"],
+                *((row[k] - row["fired"]) * 1000 for k in ("llm", "tts", "voice")),
+            )
 
     def on_track(track: rtc.Track, pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant):
         if p.identity != avatar.avatar_identity:
@@ -350,7 +368,7 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("player said: %s", ev.transcript)
         if not event_reply_pending():  # otherwise this goes unanswered; keep the event's timings
             # Latency for speech is counted from the end of the player's turn.
-            narrator.current = {"to": "speech", "fired": time.perf_counter()}
+            start_timing("speech")
 
     def on_agent_state(ev) -> None:
         # Once an event reply is audible it can no longer be dropped, and the mic is ignored
@@ -398,14 +416,16 @@ async def entrypoint(ctx: JobContext) -> None:
             if batch is None or time.perf_counter() - avatar_started > EVENT_BUDGET_S:
                 break
             prompt = "[event] " + " ".join(describe(ev) for ev in batch)
-            row = {"to": "event", "fired": time.perf_counter()}
-            narrator.current = row
+            row = start_timing("event")
             replies += 1
             logger.info("reply %d to: %s", replies, prompt)
             # Droppable until it becomes audible; see on_player_speech and on_agent_state.
             event_reply = session.generate_reply(user_input=prompt, allow_interruptions=True)
             await event_reply
-            if not event_reply.interrupted:
+            if event_reply.interrupted:
+                if row in rows:
+                    rows.remove(row)  # dropped for the player; it will never be voiced
+            else:
                 # Give the avatar a moment to start voicing it, so the next check sees it speaking.
                 await wait_until(lambda: "voice" in row, timeout=5)
     except RuntimeError as e:
