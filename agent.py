@@ -236,8 +236,9 @@ def new_agent_session() -> AgentSession:
         turn_handling={
             # the STT's own voice detection decides when the player has finished
             "turn_detection": "stt",
-            # The player can't cut the narrator off, and the mic is ignored while it speaks,
-            # so the narrator's own voice from the player's speakers is never transcribed.
+            # The player can't cut the narrator off once it is audible, and the mic is ignored
+            # while it speaks, so its own voice from the player's speakers is never transcribed.
+            # (An event reply that isn't audible yet is the exception; see on_player_speech.)
             "interruption": {"enabled": False},
         },
         tts=elevenlabs.TTS(
@@ -331,12 +332,31 @@ async def entrypoint(ctx: JobContext) -> None:
             await asyncio.sleep(0.05)
         return True
 
+    event_reply = None  # the SpeechHandle of the event reply in progress, if any
+
+    def event_reply_pending() -> bool:
+        return event_reply is not None and not event_reply.done() and not event_reply.interrupted
+
     def on_player_speech(ev) -> None:
+        if not ev.transcript.strip():
+            return
+        # The player's voice wins over an event reply that isn't audible yet: drop that reply and
+        # answer the player. The event stays in the chat history, so the answer can still use it.
+        if event_reply_pending() and session.agent_state != "speaking":
+            logger.info("player spoke; dropping the event reply in progress")
+            event_reply.interrupt()
         if not ev.is_final:
             return
-        # Latency for speech is counted from the end of the player's turn.
-        narrator.current = {"to": "speech", "fired": time.perf_counter()}
         logger.info("player said: %s", ev.transcript)
+        if not event_reply_pending():  # otherwise this goes unanswered; keep the event's timings
+            # Latency for speech is counted from the end of the player's turn.
+            narrator.current = {"to": "speech", "fired": time.perf_counter()}
+
+    def on_agent_state(ev) -> None:
+        # Once an event reply is audible it can no longer be dropped, and the mic is ignored
+        # until it finishes, so the narrator never hears itself.
+        if ev.new_state == "speaking" and event_reply_pending():
+            event_reply.allow_interruptions = False
 
     def narrator_free() -> bool:
         return (
@@ -350,6 +370,7 @@ async def entrypoint(ctx: JobContext) -> None:
         await wait_until(narrator_free, timeout=30)
 
     session.on("user_input_transcribed", on_player_speech)
+    session.on("agent_state_changed", on_agent_state)
     ctx.room.on("data_received", on_data)
     ctx.room.on("participant_disconnected", on_participant_left)
     ctx.room.on("track_subscribed", on_track)
@@ -381,9 +402,12 @@ async def entrypoint(ctx: JobContext) -> None:
             narrator.current = row
             replies += 1
             logger.info("reply %d to: %s", replies, prompt)
-            await session.generate_reply(user_input=prompt)
-            # Give the avatar a moment to start voicing it, so the next check sees it speaking.
-            await wait_until(lambda: "voice" in row, timeout=5)
+            # Droppable until it becomes audible; see on_player_speech and on_agent_state.
+            event_reply = session.generate_reply(user_input=prompt, allow_interruptions=True)
+            await event_reply
+            if not event_reply.interrupted:
+                # Give the avatar a moment to start voicing it, so the next check sees it speaking.
+                await wait_until(lambda: "voice" in row, timeout=5)
     except RuntimeError as e:
         # generate_reply raises this once the player has left and the session has closed
         logger.warning("session ended early: %s", e)

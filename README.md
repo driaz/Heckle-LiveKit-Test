@@ -37,9 +37,14 @@ The game publishes the player's mic. Scribe's server-side voice detection ends t
 after 0.6 seconds of silence, and the transcript goes to Claude as a normal user message. Event
 messages are prefixed with `[event]` so Claude can tell the two apart.
 
-The player cannot interrupt the narrator, and mic audio is discarded while the narrator is
-speaking. That keeps the narrator's own voice, coming out of the player's speakers, from being
-transcribed and answered.
+The player's voice wins over events, and nothing is answered late:
+
+- If the player speaks while the narrator is still preparing an event reply (nothing audible
+  yet), that reply is dropped and the narrator answers the player instead. The event stays in
+  the chat history, so the answer can still refer to it.
+- Once the narrator is audible, the player cannot interrupt it, and mic audio is discarded until
+  it finishes. That keeps the narrator's own voice, coming out of the player's speakers, from
+  being transcribed and answered. What the player says over it is not answered afterwards.
 
 ### Not talking over itself
 
