@@ -1,4 +1,4 @@
-"""Turn agent logs into the comparison tables: python report.py opus.log haiku.log
+"""Turn agent logs into the comparison tables: python report.py opus.log haiku.log sonnet.log
 
 Each file is the saved output of `lk agent logs` for one run. Prints Markdown.
 """
