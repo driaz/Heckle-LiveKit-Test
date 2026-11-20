@@ -23,8 +23,8 @@ on Haiku.
 **Sonnet was no faster than Opus, and less steady.** Its median first token was 0.85 s, the same
 as Opus within noise, and its median event-to-voice was 2.6 s. Six of its 18 events (9–11 and
 14–16) took 1.7–4.5 s to produce a first token, which is what pushes its p90 to 5.6 s; the other
-twelve were between 0.64 and 0.94 s. Nothing in the logs explains the slow ones, and one run cannot
-tell a slow spell at the API from how Sonnet normally behaves.
+twelve were between 0.64 and 0.94 s. This was not a passing API problem: it reproduced in every
+round of a direct API probe over the following hour (see "Slow first tokens" below).
 
 | ms | Opus median | Opus p90 | Haiku median | Haiku p90 | Sonnet median | Sonnet p90 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -55,6 +55,49 @@ speech, but the narrator talks for longer per event.
 
 With one run per model, differences under about 0.1 s are noise. Opus restricted to the same 18
 events gives the same medians to within 5 ms.
+
+### Slow first tokens: direct API probe
+
+To find out whether Sonnet's slow events were a one-off, `probe.py` sent the same prompts straight
+to the Claude API (no ElevenLabs, no Runway, no LiveKit) between 20:49 and 21:42 UTC the same day,
+500 calls in all, Sonnet and Opus called seconds apart. It ran from a different network location
+than the rig, so compare within the table, not against the rig's numbers. "Slow" is a first token
+later than 1.5 s.
+
+| Order of events | Model | Calls | Median ms | p90 ms | Max ms | Slow |
+| --- | --- | --- | --- | --- | --- | --- |
+| Forward, as on the rig | Opus | 120 | 778 | 1099 | 1585 | 2 |
+| Forward, as on the rig | Sonnet | 120 | 932 | 2704 | 4804 | 19 |
+| Reversed | Opus | 100 | 1320 | 3499 | 6800 | 40 |
+| Reversed | Sonnet | 100 | 842 | 1824 | 10739 | 14 |
+| Each event alone, no history | Sonnet | 60 | 513 | 765 | 879 | 0 |
+
+What this shows:
+
+- **It is not the time of day.** Slow calls appeared in every round of every conversation run, six
+  forward rounds and five reversed, spread over 50 minutes. No call failed or was retried.
+- **It is not the individual prompts.** Sent alone, the same 20 events never took Sonnet longer
+  than 0.9 s, and its median fell to 0.5 s.
+- **It comes with conversation history, mostly mid-conversation.** In the forward order every slow
+  Sonnet call was on events 8–16 and none on the first seven, matching the rig run.
+- **Opus is not immune.** In the forward order Opus was clean, as it was on the rig. With the same
+  events reversed, 40 of 100 Opus calls were slow, in back-to-back runs with the forward order. So
+  whether a model stalls depends on what the conversation contains, not only on which model it is.
+- **The wait is before the reply starts.** In a replay that recorded the stream, the 4 s calls
+  spent that time before the API sent the start of the response. Sonnet also produced a short
+  thinking block before its text on most turns, without being asked; that cost about 0.1–0.5 s a
+  turn and does not account for the 4 s stalls.
+
+Why history triggers the stalls was not found. Two things that follow for Heckle: the Opus numbers
+above describe this event order and should not be read as a guarantee for real play, and sending
+less history is worth testing as a way to cut both the stalls and the typical first-token time
+(not tested on Opus, and it would cost the narrator its callbacks to earlier events).
+
+To repeat a probe (output file, models, rounds, seconds between rounds, number of events, order):
+
+```bash
+python probe.py out.jsonl claude-sonnet-5-5,claude-opus-5-5 4 300 20 forward
+```
 
 ### Per model, as `report.py` prints it
 
