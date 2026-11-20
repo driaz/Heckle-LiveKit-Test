@@ -159,5 +159,5 @@ Event 20 did not fire: the session's time budget ran out.
 
 - Ways to cut the avatar's ~0.9 s, or running without the avatar on this stack for a direct v1
   comparison.
-- `eleven_flash_v2_5` or a faster LLM.
+- `eleven_flash_v2_5`. (A faster LLM, Haiku, has since been tested: see the README.)
 - Viewer-side latency, other regions, or more than one viewer.
