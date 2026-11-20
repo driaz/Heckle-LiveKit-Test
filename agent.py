@@ -4,6 +4,8 @@ Throwaway. Measures how long after a game event the narrator starts talking.
 """
 
 import asyncio
+import datetime
+import json
 import logging
 import math
 import os
@@ -16,6 +18,11 @@ from livekit.agents.voice import room_io
 from livekit.plugins import anthropic, elevenlabs, runway
 
 logger = logging.getLogger("heckle")
+
+# The narrator LLM. Set HECKLE_LLM_MODEL to compare models, e.g. claude-haiku-5-5.
+LLM_MODEL = os.environ.get("HECKLE_LLM_MODEL") or "claude-opus-5-5"
+# Runs start by explicit dispatch to this name, so the rig never picks up another agent's rooms.
+AGENT_NAME = "heckle-latency-rig"
 
 EVENTS = [
     "fell off the ledge for the fifth time",
@@ -52,7 +59,9 @@ VOICE_PEAK_THRESHOLD = 1000
 VOICE_ONSET_SILENCE_S = 0.3
 # The avatar can't voice a reply sooner than this after TTS produced its first audio.
 MIN_TTS_TO_VOICE_S = 0.1
-COLUMNS = ("llm", "tts", "voice")
+COLUMNS = ("llm", "llm_done", "tts", "voice")
+# Prefix of the one-line JSON record logged per event; report.py reads these.
+EVENT_LOG_PREFIX = "EVENT_JSON "
 
 INSTRUCTIONS = (
     "You are the narrator of a platformer game, and you are sarcastic and merciless. "
@@ -62,7 +71,7 @@ INSTRUCTIONS = (
 
 
 class Narrator(Agent):
-    """Stamps the first LLM token and first TTS audio frame of each reply."""
+    """Stamps each reply's first and last LLM token and first TTS audio frame, and keeps its text."""
 
     def __init__(self) -> None:
         super().__init__(instructions=INSTRUCTIONS)
@@ -75,7 +84,11 @@ class Narrator(Agent):
     async def llm_node(self, chat_ctx, tools, model_settings):
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             self._stamp("llm")
+            if (cur := self.current) is not None:
+                delta = chunk if isinstance(chunk, str) else getattr(chunk.delta, "content", None)
+                cur["text"] = cur.get("text", "") + (delta or "")
             yield chunk
+        self._stamp("llm_done")
 
     async def tts_node(self, text, model_settings):
         async for frame in Agent.default.tts_node(self, text, model_settings):
@@ -85,6 +98,33 @@ class Narrator(Agent):
 
 def offset_ms(row: dict, key: str) -> float | None:
     return (row[key] - row["fired"]) * 1000 if key in row else None
+
+
+def event_record(n: int, row: dict) -> dict:
+    """Everything measured for one event: UTC timestamps, ms after the event, and the line."""
+
+    def wall(key: str) -> str | None:
+        if key not in row:
+            return None
+        at = row["fired_wall"] + datetime.timedelta(seconds=row[key] - row["fired"])
+        return at.isoformat(timespec="milliseconds")
+
+    def ms(key: str) -> int | None:
+        return None if (v := offset_ms(row, key)) is None else round(v)
+
+    return {
+        "model": LLM_MODEL,
+        "n": n,
+        "event": row["event"],
+        "event_received": wall("fired"),
+        "claude_first_token": wall("llm"),
+        "claude_done": wall("llm_done"),
+        "elevenlabs_first_audio": wall("tts"),
+        "runway_first_audio_out": wall("voice"),
+        "ms": {key: ms(key) for key in COLUMNS},
+        "voice_not_trusted": distrust(row),
+        "text": row.get("text", "").strip(),
+    }
 
 
 def distrust(row: dict) -> str | None:
@@ -102,12 +142,13 @@ def summary_table(rows: list[dict], avatar_startup_s: float | None) -> str:
     def cell(value: float | None) -> str:
         return "-" if value is None else f"{value:.0f}"
 
-    head = f"{'#':>2}  {'event':<50} {'LLM ms':>7} {'TTS ms':>7} {'voice ms':>9}"
+    head = f"{'#':>2}  {'event':<50} {'LLM ms':>7} {'done ms':>7} {'TTS ms':>7} {'voice ms':>9}"
     rule = "-" * len(head)
     lines = [
         "",
-        "SUMMARY. Milliseconds after the event fired: LLM first token, TTS first audio frame,",
-        "first avatar audio (what a viewer hears, lip-synced). * = voice time not trusted.",
+        f"SUMMARY for {LLM_MODEL}. Milliseconds after the event fired: LLM first token, LLM done,",
+        "TTS first audio frame, first avatar audio (what a viewer hears, lip-synced).",
+        "* = voice time not trusted.",
         head,
         rule,
     ]
@@ -117,8 +158,8 @@ def summary_table(rows: list[dict], avatar_startup_s: float | None) -> str:
         if reason:
             notes.append(f"* row {i}: {reason}; left out of the voice stats")
         voice = cell(offset_ms(r, "voice")) + ("*" if reason else " ")
-        llm, tts = cell(offset_ms(r, "llm")), cell(offset_ms(r, "tts"))
-        lines.append(f"{i:>2}  {r['event'][:50]:<50} {llm:>7} {tts:>7} {voice:>9}")
+        llm, done, tts = (cell(offset_ms(r, k)) for k in ("llm", "llm_done", "tts"))
+        lines.append(f"{i:>2}  {r['event'][:50]:<50} {llm:>7} {done:>7} {tts:>7} {voice:>9}")
     lines.append(rule)
 
     values = {
@@ -136,8 +177,8 @@ def summary_table(rows: list[dict], avatar_startup_s: float | None) -> str:
         "rows counted": lambda v: len(v),
     }
     for name, fn in stats.items():
-        llm, tts, voice = (cell(fn(values[k])) if values[k] else "-" for k in COLUMNS)
-        lines.append(f"{'':>2}  {name:<50} {llm:>7} {tts:>7} {voice + ' ':>9}")
+        llm, done, tts, voice = (cell(fn(values[k])) if values[k] else "-" for k in COLUMNS)
+        lines.append(f"{'':>2}  {name:<50} {llm:>7} {done:>7} {tts:>7} {voice + ' ':>9}")
     lines += notes
     if len(rows) < len(EVENTS):
         lines.append(f"Only {len(rows)} of {len(EVENTS)} events fired")
@@ -149,7 +190,7 @@ def summary_table(rows: list[dict], avatar_startup_s: float | None) -> str:
 def new_agent_session() -> AgentSession:
     return AgentSession(
         llm=anthropic.LLM(
-            model="claude-opus-5-5",
+            model=LLM_MODEL,
             api_key=os.environ["HECKLE_ANTHROPIC_API_KEY"],
         ),
         tts=elevenlabs.TTS(
@@ -162,8 +203,8 @@ def new_agent_session() -> AgentSession:
 
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
-    participant = await ctx.wait_for_participant()
-    logger.info("participant %s joined, starting avatar", participant.identity)
+    # The dispatch starts the run. The worker hears the avatar itself, so no viewer is needed.
+    logger.info("run starting in room %s with %s", ctx.room.name, LLM_MODEL)
 
     rows: list[dict] = []
     avatar_startup_s: float | None = None
@@ -250,6 +291,7 @@ async def entrypoint(ctx: JobContext) -> None:
             row = {
                 "event": event,
                 "fired": now,
+                "fired_wall": datetime.datetime.now(datetime.timezone.utc),
                 "audio_at_fire": now - last_loud < VOICE_ONSET_SILENCE_S,
             }
             rows.append(row)
@@ -262,12 +304,7 @@ async def entrypoint(ctx: JobContext) -> None:
             await wait_until(
                 lambda: time.perf_counter() - last_loud >= GAP_AFTER_SPEECH_S, timeout=30
             )
-            logger.info(
-                "event %d: llm +%s ms, tts +%s ms, avatar voice +%s ms%s",
-                len(rows),
-                *(f"{v:.0f}" if (v := offset_ms(row, k)) is not None else "-" for k in COLUMNS),
-                f" (not trusted: {reason})" if (reason := distrust(row)) else "",
-            )
+            logger.info(EVENT_LOG_PREFIX + json.dumps(event_record(len(rows), row)))
     except RuntimeError as e:
         # generate_reply raises this once the viewer has left and the session has closed
         logger.warning("run ended early: %s", e)
@@ -282,4 +319,4 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name=AGENT_NAME))
