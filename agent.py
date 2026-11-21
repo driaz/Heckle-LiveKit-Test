@@ -18,6 +18,14 @@ from livekit.plugins import anthropic, elevenlabs, runway
 
 logger = logging.getLogger("heckle")
 
+# The narrator LLM. Set HECKLE_LLM_MODEL to switch, e.g. claude-haiku-5-5.
+LLM_MODEL = os.environ.get("HECKLE_LLM_MODEL") or "claude-opus-5-5"
+# Haiku runs long, so it gets a stricter length rule and a hard cap on output tokens.
+# 60 tokens is about 30 spoken words. Opus keeps the prompt as it is and has no cap.
+IS_HAIKU = "haiku" in LLM_MODEL
+MAX_REPLY_TOKENS = 60 if IS_HAIKU else None
+SENTENCE_END = (".", "!", "?", "…", '"', "'", ")")
+
 EVENT_TOPIC = "heckle.event"
 MAX_EVENT_BYTES = 512
 MAX_FIELD_CHARS = 60
@@ -64,9 +72,17 @@ Always:
 - Write for the ear: rhetorical questions, pauses via commas, dashes and ellipses, and the punch
   word at the end of the sentence."""
 
+HAIKU_LENGTH_RULE = """
+
+Length limit, strictly enforced:
+- A reply to an [event] is one sentence of at most 15 words.
+- A reply to the player is at most two sentences and 25 words in total.
+- Anything longer is cut off mid-word, so finish early: one clause and the punchline, not a chain
+  of clauses joined by commas."""
+
 
 class Narrator(Agent):
-    """Stamps the first LLM token and first TTS audio frame of each reply."""
+    """Stamps the first LLM token and first TTS audio frame of each reply, and logs its line."""
 
     def __init__(self, instructions: str) -> None:
         super().__init__(instructions=instructions)
@@ -77,9 +93,24 @@ class Narrator(Agent):
             self.current[key] = time.perf_counter()
 
     async def llm_node(self, chat_ctx, tools, model_settings):
+        row, text = self.current, ""
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             self._stamp("llm")
+            if isinstance(chunk, str):
+                text += chunk
+            elif chunk.delta is not None and chunk.delta.content:
+                text += chunk.delta.content
             yield chunk
+        text = " ".join(text.split())
+        # A reply that stops without closing punctuation ran into the token cap.
+        cut_off = MAX_REPLY_TOKENS is not None and not text.endswith(SENTENCE_END)
+        logger.info(
+            "%s line (%d words%s): %s",
+            row["to"] if row else "unprompted",
+            len(text.split()),
+            ", CUT OFF by the token cap" if cut_off else "",
+            text,
+        )
 
     async def tts_node(self, text, model_settings):
         async for frame in Agent.default.tts_node(self, text, model_settings):
@@ -227,8 +258,9 @@ def parse_event(data: bytes) -> dict | None:
 def new_agent_session() -> AgentSession:
     return AgentSession(
         llm=anthropic.LLM(
-            model="claude-opus-5-5",
+            model=LLM_MODEL,
             api_key=os.environ["HECKLE_ANTHROPIC_API_KEY"],
+            **({"max_tokens": MAX_REPLY_TOKENS} if MAX_REPLY_TOKENS else {}),
         ),
         stt=elevenlabs.STT(
             model="scribe_v2_realtime",
@@ -261,10 +293,10 @@ async def entrypoint(ctx: JobContext) -> None:
     except RuntimeError:
         logger.info("room closed before a player joined")  # e.g. the page was reloaded
         return
-    logger.info("player %s joined, starting avatar", player.identity)
+    logger.info("player %s joined, starting avatar; narrator model %s", player.identity, LLM_MODEL)
 
     # The game's token endpoint puts a description of the level in the player's metadata.
-    instructions = INSTRUCTIONS
+    instructions = INSTRUCTIONS + (HAIKU_LENGTH_RULE if IS_HAIKU else "")
     if guide := (player.metadata or "")[:MAX_LEVEL_GUIDE_CHARS].strip():
         instructions += f"\n\nThe course, in order:\n{guide}"
 

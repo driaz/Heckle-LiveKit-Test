@@ -2,7 +2,7 @@
 
 The narrator for [Heckle](https://github.com/driaz/Heckle), running as a LiveKit agent:
 
-game event or player speech → Claude Opus 5.5 → ElevenLabs v4 Turbo → Runway Characters avatar (preset `cat-character`, the cat)
+game event or player speech → Claude (Opus 5.5 by default) → ElevenLabs v4 Turbo → Runway Characters avatar (preset `cat-character`, the cat)
 
 Player speech is transcribed by ElevenLabs Scribe v2 realtime, using the same ElevenLabs key.
 
@@ -67,9 +67,35 @@ Runway caps a session at 5 minutes. No reply starts after 270 seconds; the agent
 Runway session and leaves, and the game joins a fresh room for a new session. The agent also
 leaves as soon as the player does.
 
-Per reply the agent logs first token from Claude, first audio from ElevenLabs, and first audible
-audio on the avatar's track. For an event reply the times are in ms after it started on the
+Per reply the agent logs the line Claude wrote with its word count, first token from Claude, first
+audio from ElevenLabs, and first audible audio on the avatar's track. For an event reply the times are in ms after it started on the
 batch; for a speech reply, after the final transcript arrived.
+
+## Narrator model
+
+`agent.py` reads `HECKLE_LLM_MODEL` and falls back to `claude-opus-5-5` when it is unset or empty.
+On LiveKit Cloud it is an agent secret; setting it restarts the agent. The agent logs the model
+when a player joins.
+
+Switch to Haiku:
+
+```bash
+lk agent update-secrets --secrets "HECKLE_LLM_MODEL=claude-haiku-5-5"
+```
+
+Back to Opus:
+
+```bash
+lk agent update-secrets --secrets "HECKLE_LLM_MODEL=claude-opus-5-5"
+```
+
+Haiku runs long, so any model with "haiku" in its name gets two extras. Opus gets neither: its
+prompt is unchanged and it has no cap.
+
+- A length rule appended to the prompt: one sentence of at most 15 words for an event, at most two
+  sentences and 25 words for a reply to the player.
+- A hard cap of 60 output tokens, about 30 spoken words. A reply that reaches it stops there, and
+  its log line says `CUT OFF by the token cap`.
 
 ## Deploy
 
@@ -96,7 +122,7 @@ lk agent logs
 If the agent has been deleted, create a new one; this rewrites `livekit.toml`:
 
 ```bash
-lk agent create --region us-east --secrets-file <file with the three secrets below>
+lk agent create --region us-east --secrets-file <file with the three keys below>
 ```
 
 Secrets live in LiveKit Cloud, never in the repo. To change one:
@@ -110,6 +136,7 @@ lk agent update-secrets --secrets "ELEVENLABS_API_KEY=<value>"
 | `HECKLE_ANTHROPIC_API_KEY` | passed to the Anthropic plugin as `api_key=` |
 | `ELEVENLABS_API_KEY` | passed to the ElevenLabs plugin as `api_key=` (its own default name is `ELEVEN_API_KEY`) |
 | `RUNWAYML_API_SECRET` | read by the Runway plugin directly |
+| `HECKLE_LLM_MODEL` | optional; the Claude model, default `claude-opus-5-5` |
 
 `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` are injected by LiveKit Cloud.
 
