@@ -8,6 +8,24 @@ The Claude model is configurable. The default is `claude-opus-5-5`; `claude-haik
 `claude-sonnet-5-5` have been run as comparisons. Earlier Opus-only runs and operational lessons
 are in [RESULTS.md](RESULTS.md).
 
+## Recommendation
+
+**Use Haiku for the narrator, provided its lines are funny enough.** The evidence is in the next
+section; the lines are under "Every line, side by side".
+
+- **It is the only one of the three that hits the target.** Haiku's 1.8 s median event-to-voice is
+  inside Heckle v1's 1–2 s range. Opus at 2.4 s and Sonnet at 2.6 s are not.
+- **It was the steadiest.** Its slowest event was under 2 s. Opus stalled for several seconds in
+  the direct API probe when the same events ran in a different order.
+- **The cost is quality control, not speed.** Haiku ran long, broke the two-sentence rule in 5 of
+  18 replies, and a few of its lines drift into giving advice. Expect to tighten the prompt or cap
+  the reply length; neither fix has been tested.
+- **Skip Sonnet.** It was slower than Haiku and less steady than Opus.
+
+Limits: this rests on one 18-event Haiku run, and Haiku was not probed for stalls in other event
+orders the way Opus and Sonnet were. Keep the model switchable in the game, as it is here, so
+falling back to Opus is a one-line change. Opus remains the default in this repo.
+
 ## Opus vs Haiku vs Sonnet (2026-11-20)
 
 One run per model, same 20 scripted events, same prompt, voice and avatar, on LiveKit Cloud
