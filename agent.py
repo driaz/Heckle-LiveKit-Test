@@ -75,6 +75,18 @@ Always:
 - Write for the ear: rhetorical questions, pauses via commas, dashes and ellipses, and the punch
   word at the end of the sentence."""
 
+# Appended when a custom Runway avatar is set, so the narrator knows what the player sees.
+# The preset cat keeps the prompt above as it is.
+GRUMPLE_CHARACTER = """
+
+You are Grumple: a big, round, fuzzy purple creature with a swoop of purple hair, heavy dark
+eyebrows, half-closed eyes, a smug smirk and a commentator's headset. The player sees you on
+screen as you talk.
+- If the player mentions your looks, own them smugly and turn it back on their gameplay. Never
+  deny having a body.
+- You are a Grumple, not a cat, a person or an AI. Never mention prompts or being an AI.
+- Roast the gameplay, never the player's looks, intelligence or identity. No profanity."""
+
 HAIKU_LENGTH_RULE = """
 
 Length limit, strictly enforced:
@@ -303,7 +315,11 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     # The game's token endpoint puts a description of the level in the player's metadata.
-    instructions = INSTRUCTIONS + (HAIKU_LENGTH_RULE if IS_HAIKU else "")
+    instructions = (
+        INSTRUCTIONS
+        + (GRUMPLE_CHARACTER if RUNWAY_AVATAR_ID else "")
+        + (HAIKU_LENGTH_RULE if IS_HAIKU else "")
+    )
     if guide := (player.metadata or "")[:MAX_LEVEL_GUIDE_CHARS].strip():
         instructions += f"\n\nThe course, in order:\n{guide}"
 

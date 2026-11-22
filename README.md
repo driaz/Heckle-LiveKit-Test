@@ -137,7 +137,7 @@ lk agent update-secrets --secrets "ELEVENLABS_API_KEY=<value>"
 | `ELEVENLABS_API_KEY` | passed to the ElevenLabs plugin as `api_key=` (its own default name is `ELEVEN_API_KEY`) |
 | `RUNWAYML_API_SECRET` | read by the Runway plugin directly |
 | `HECKLE_LLM_MODEL` | optional; the Claude model, default `claude-opus-5-5` |
-| `HECKLE_RUNWAY_AVATAR_ID` | optional; the ID of a custom Runway Character. Unset or empty uses the preset `cat-character` |
+| `HECKLE_RUNWAY_AVATAR_ID` | optional; the ID of a custom Runway Character. Unset or empty uses the preset `cat-character`. When set, the prompt also tells the narrator it is Grumple, the purple creature on screen |
 
 `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` are injected by LiveKit Cloud.
 
