@@ -24,6 +24,9 @@ LLM_MODEL = os.environ.get("HECKLE_LLM_MODEL") or "claude-opus-5-5"
 # 60 tokens is about 30 spoken words. Opus keeps the prompt as it is and has no cap.
 IS_HAIKU = "haiku" in LLM_MODEL
 MAX_REPLY_TOKENS = 60 if IS_HAIKU else None
+# The Runway Character. Set HECKLE_RUNWAY_AVATAR_ID to a custom avatar's ID; unset or empty is the cat.
+RUNWAY_AVATAR_ID = os.environ.get("HECKLE_RUNWAY_AVATAR_ID", "").strip()
+RUNWAY_PRESET_ID = "cat-character"
 SENTENCE_END = (".", "!", "?", "…", '"', "'", ")")
 
 EVENT_TOPIC = "heckle.event"
@@ -72,6 +75,17 @@ Always:
 - Write for the ear: rhetorical questions, pauses via commas, dashes and ellipses, and the punch
   word at the end of the sentence."""
 
+# Appended when a custom Runway avatar is set, so the narrator knows what the player sees.
+# The preset cat keeps the prompt above as it is.
+GRUMPLE_CHARACTER = """
+
+You are Grumple: a big, round, fuzzy purple creature with a swoop of purple hair, heavy dark
+eyebrows, half-closed eyes, a smug smirk and a commentator's headset. The player sees you on
+screen as you talk.
+- If the player mentions your looks, own them smugly and turn it back on their gameplay. Never
+  deny having a body.
+- You are a Grumple, not a cat, a person or an AI. Never mention prompts or being an AI."""
+
 HAIKU_LENGTH_RULE = """
 
 Length limit, strictly enforced:
@@ -88,14 +102,15 @@ class Narrator(Agent):
         super().__init__(instructions=instructions)
         self.current: dict | None = None  # timings of the reply in progress
 
-    def _stamp(self, key: str) -> None:
-        if self.current is not None and key not in self.current:
-            self.current[key] = time.perf_counter()
+    @staticmethod
+    def _stamp(row: dict | None, key: str) -> None:
+        if row is not None and key not in row:
+            row[key] = time.perf_counter()
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         row, text = self.current, ""
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
-            self._stamp("llm")
+            self._stamp(row, "llm")
             if isinstance(chunk, str):
                 text += chunk
             elif chunk.delta is not None and chunk.delta.content:
@@ -113,8 +128,11 @@ class Narrator(Agent):
         )
 
     async def tts_node(self, text, model_settings):
+        # The reply this audio belongs to. `current` can move on to a newer reply while this one
+        # is still being synthesised, e.g. when the player speaks over it.
+        row = self.current
         async for frame in Agent.default.tts_node(self, text, model_settings):
-            self._stamp("tts")
+            self._stamp(row, "tts")
             yield frame
 
 
@@ -293,17 +311,27 @@ async def entrypoint(ctx: JobContext) -> None:
     except RuntimeError:
         logger.info("room closed before a player joined")  # e.g. the page was reloaded
         return
-    logger.info("player %s joined, starting avatar; narrator model %s", player.identity, LLM_MODEL)
+    avatar_name = f"custom {RUNWAY_AVATAR_ID}" if RUNWAY_AVATAR_ID else f"preset {RUNWAY_PRESET_ID}"
+    logger.info(
+        "player %s joined, starting avatar %s; narrator model %s",
+        player.identity, avatar_name, LLM_MODEL,
+    )
 
     # The game's token endpoint puts a description of the level in the player's metadata.
-    instructions = INSTRUCTIONS + (HAIKU_LENGTH_RULE if IS_HAIKU else "")
+    instructions = (
+        INSTRUCTIONS
+        + (GRUMPLE_CHARACTER if RUNWAY_AVATAR_ID else "")
+        + (HAIKU_LENGTH_RULE if IS_HAIKU else "")
+    )
     if guide := (player.metadata or "")[:MAX_LEVEL_GUIDE_CHARS].strip():
         instructions += f"\n\nThe course, in order:\n{guide}"
 
     narrator = Narrator(instructions)
     session = new_agent_session()
     # reads RUNWAYML_API_SECRET and LIVEKIT_* from the environment
-    avatar = runway.AvatarSession(preset_id="cat-character", max_duration=AVATAR_MAX_DURATION_S)
+    # the plugin rejects avatar_id and preset_id together
+    which = {"avatar_id": RUNWAY_AVATAR_ID} if RUNWAY_AVATAR_ID else {"preset_id": RUNWAY_PRESET_ID}
+    avatar = runway.AvatarSession(**which, max_duration=AVATAR_MAX_DURATION_S)
     avatar_video_at: asyncio.Future[float] = asyncio.get_running_loop().create_future()
     watchers: set[asyncio.Task] = set()
     last_loud = float("-inf")  # when the avatar's audio track was last audible
@@ -335,6 +363,14 @@ async def entrypoint(ctx: JobContext) -> None:
         if p.identity == player.identity:
             logger.info("player left")
             inbox.close()
+        else:
+            # e.g. the Runway avatar dropping out mid-session
+            reason = getattr(p, "disconnect_reason", None)
+            try:
+                reason = rtc.DisconnectReason.Name(reason)
+            except (AttributeError, TypeError, ValueError):
+                pass
+            logger.warning("participant %s left: %s", p.identity, reason)
 
     async def watch_video(track: rtc.Track) -> None:
         stream = rtc.VideoStream(track)
@@ -357,7 +393,7 @@ async def entrypoint(ctx: JobContext) -> None:
             # were dropped or never spoken.
             if not quiet_before:
                 continue
-            spoken = next((i for i, r in enumerate(rows) if "tts" in r), None)
+            spoken = next((i for i, r in enumerate(rows) if "tts" in r and "llm" in r), None)
             if spoken is None:
                 continue
             row = rows[spoken]
