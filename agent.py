@@ -24,6 +24,9 @@ LLM_MODEL = os.environ.get("HECKLE_LLM_MODEL") or "claude-opus-5-5"
 # 60 tokens is about 30 spoken words. Opus keeps the prompt as it is and has no cap.
 IS_HAIKU = "haiku" in LLM_MODEL
 MAX_REPLY_TOKENS = 60 if IS_HAIKU else None
+# The Runway Character. Set HECKLE_RUNWAY_AVATAR_ID to a custom avatar's ID; unset or empty is the cat.
+RUNWAY_AVATAR_ID = os.environ.get("HECKLE_RUNWAY_AVATAR_ID", "").strip()
+RUNWAY_PRESET_ID = "cat-character"
 SENTENCE_END = (".", "!", "?", "…", '"', "'", ")")
 
 EVENT_TOPIC = "heckle.event"
@@ -293,7 +296,11 @@ async def entrypoint(ctx: JobContext) -> None:
     except RuntimeError:
         logger.info("room closed before a player joined")  # e.g. the page was reloaded
         return
-    logger.info("player %s joined, starting avatar; narrator model %s", player.identity, LLM_MODEL)
+    avatar_name = f"custom {RUNWAY_AVATAR_ID}" if RUNWAY_AVATAR_ID else f"preset {RUNWAY_PRESET_ID}"
+    logger.info(
+        "player %s joined, starting avatar %s; narrator model %s",
+        player.identity, avatar_name, LLM_MODEL,
+    )
 
     # The game's token endpoint puts a description of the level in the player's metadata.
     instructions = INSTRUCTIONS + (HAIKU_LENGTH_RULE if IS_HAIKU else "")
@@ -303,7 +310,9 @@ async def entrypoint(ctx: JobContext) -> None:
     narrator = Narrator(instructions)
     session = new_agent_session()
     # reads RUNWAYML_API_SECRET and LIVEKIT_* from the environment
-    avatar = runway.AvatarSession(preset_id="cat-character", max_duration=AVATAR_MAX_DURATION_S)
+    # the plugin rejects avatar_id and preset_id together
+    which = {"avatar_id": RUNWAY_AVATAR_ID} if RUNWAY_AVATAR_ID else {"preset_id": RUNWAY_PRESET_ID}
+    avatar = runway.AvatarSession(**which, max_duration=AVATAR_MAX_DURATION_S)
     avatar_video_at: asyncio.Future[float] = asyncio.get_running_loop().create_future()
     watchers: set[asyncio.Task] = set()
     last_loud = float("-inf")  # when the avatar's audio track was last audible

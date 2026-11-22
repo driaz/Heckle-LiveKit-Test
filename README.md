@@ -2,7 +2,7 @@
 
 The narrator for [Heckle](https://github.com/driaz/Heckle), running as a LiveKit agent:
 
-game event or player speech → Claude (Opus 5.5 by default) → ElevenLabs v4 Turbo → Runway Characters avatar (preset `cat-character`, the cat)
+game event or player speech → Claude (Opus 5.5 by default) → ElevenLabs v4 Turbo → Runway Characters avatar (the preset cat `cat-character` by default, or a custom Character set by `HECKLE_RUNWAY_AVATAR_ID`)
 
 Player speech is transcribed by ElevenLabs Scribe v2 realtime, using the same ElevenLabs key.
 
@@ -137,6 +137,7 @@ lk agent update-secrets --secrets "ELEVENLABS_API_KEY=<value>"
 | `ELEVENLABS_API_KEY` | passed to the ElevenLabs plugin as `api_key=` (its own default name is `ELEVEN_API_KEY`) |
 | `RUNWAYML_API_SECRET` | read by the Runway plugin directly |
 | `HECKLE_LLM_MODEL` | optional; the Claude model, default `claude-opus-5-5` |
+| `HECKLE_RUNWAY_AVATAR_ID` | optional; the ID of a custom Runway Character. Unset or empty uses the preset `cat-character` |
 
 `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` are injected by LiveKit Cloud.
 
