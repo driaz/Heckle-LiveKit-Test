@@ -359,6 +359,11 @@ async def entrypoint(ctx: JobContext) -> None:
         if p.identity == player.identity:
             logger.info("player left")
             inbox.close()
+        else:
+            # e.g. the Runway avatar dropping out mid-session
+            logger.warning(
+                "participant %s left: %s", p.identity, getattr(p, "disconnect_reason", None)
+            )
 
     async def watch_video(track: rtc.Track) -> None:
         stream = rtc.VideoStream(track)
