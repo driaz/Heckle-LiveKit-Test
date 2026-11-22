@@ -102,14 +102,15 @@ class Narrator(Agent):
         super().__init__(instructions=instructions)
         self.current: dict | None = None  # timings of the reply in progress
 
-    def _stamp(self, key: str) -> None:
-        if self.current is not None and key not in self.current:
-            self.current[key] = time.perf_counter()
+    @staticmethod
+    def _stamp(row: dict | None, key: str) -> None:
+        if row is not None and key not in row:
+            row[key] = time.perf_counter()
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         row, text = self.current, ""
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
-            self._stamp("llm")
+            self._stamp(row, "llm")
             if isinstance(chunk, str):
                 text += chunk
             elif chunk.delta is not None and chunk.delta.content:
@@ -127,8 +128,11 @@ class Narrator(Agent):
         )
 
     async def tts_node(self, text, model_settings):
+        # The reply this audio belongs to. `current` can move on to a newer reply while this one
+        # is still being synthesised, e.g. when the player speaks over it.
+        row = self.current
         async for frame in Agent.default.tts_node(self, text, model_settings):
-            self._stamp("tts")
+            self._stamp(row, "tts")
             yield frame
 
 
@@ -361,9 +365,12 @@ async def entrypoint(ctx: JobContext) -> None:
             inbox.close()
         else:
             # e.g. the Runway avatar dropping out mid-session
-            logger.warning(
-                "participant %s left: %s", p.identity, getattr(p, "disconnect_reason", None)
-            )
+            reason = getattr(p, "disconnect_reason", None)
+            try:
+                reason = rtc.DisconnectReason.Name(reason)
+            except (AttributeError, TypeError, ValueError):
+                pass
+            logger.warning("participant %s left: %s", p.identity, reason)
 
     async def watch_video(track: rtc.Track) -> None:
         stream = rtc.VideoStream(track)
@@ -386,7 +393,7 @@ async def entrypoint(ctx: JobContext) -> None:
             # were dropped or never spoken.
             if not quiet_before:
                 continue
-            spoken = next((i for i, r in enumerate(rows) if "tts" in r), None)
+            spoken = next((i for i, r in enumerate(rows) if "tts" in r and "llm" in r), None)
             if spoken is None:
                 continue
             row = rows[spoken]
