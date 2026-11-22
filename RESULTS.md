@@ -102,6 +102,67 @@ Two earlier runs are not counted as baselines:
 
 Event 20 did not fire: the session's time budget ran out.
 
+## Grumple: custom Runway Character (2026-11-22)
+
+A different setup from the runs above: real sessions of the game with the player's mic on, Claude
+Haiku 5.5 (`claude-haiku-5-5`) with the 60-token cap, ElevenLabs v4 Turbo and Scribe v2, and the
+custom Runway Character "Grumple" (`HECKLE_RUNWAY_AVATAR_ID`, avatar
+`5f94008c-0159-4bfc-b909-ba4f045a36b3`) in place of the `cat-character` preset.
+
+**A custom Character costs nothing over the preset.** The Runway stage and the first video frame
+match the cat; event to audible voice is about 1.66 s at the median.
+
+Times are milliseconds after the event fired, or after the final transcript for a speech reply.
+"Runway" is avatar voice minus TTS first audio, per reply.
+
+| Session | Prompt | Replies | LLM median | TTS median | Voice median | Voice max | Runway median | First video frame |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| G1, events | narrator (no character block) | 7 | 303 | 696 | 1665 | 1778 | 976 | 6.1 s |
+| G1, speech | narrator (no character block) | 9 | 345 | 781 | 1765 | 1896 | 992 | |
+| G2, events | with the Grumple block | 10 | 295 | 704 | 1655 | 2022 | 972 | 5.9 s |
+| G2, speech | with the Grumple block | 4 | 368 | 708 | 1695 | 1749 | 943 | |
+
+For comparison, the cat preset on Haiku (a run not recorded in this file) had an event-to-voice
+median of 1.85 s, a Runway stage of about 0.98 s and a first video frame at about 6 s. The 0.2 s
+gain to voice is not from the avatar, since the Runway stage is flat; with 7 and 10 events it is
+within the noise.
+
+G1 ran the full 270 s budget. G2 ran 183 s and ended when the player left. The Grumple block adds
+about 100 prompt tokens and made no visible difference to Claude's first token.
+
+### Session G2: event replies
+
+| # | Event | LLM first token | TTS first audio | Avatar voice |
+| --- | --- | --- | --- | --- |
+| 1 | fell off Spinning Lily Pads, death 1 | 261 | 627 | 1621 |
+| 2 | fell off Spinning Lily Pads, death 2 | 278 | 699 | 1622 |
+| 3 | reached the Crystal Gauntlet checkpoint | 272 | 708 | 1722 |
+| 4 | fell off Vanishing Steps, death 3 | 308 | 665 | 1472 |
+| 5 | fell off Vanishing Steps, death 4 | 498 | 847 | 1904 |
+| 6 | fell off Vanishing Steps, death 5 | 275 | 691 | 1647 |
+| 7 | died twice in a row, Vanishing Steps, death 7 | 328 | 764 | 1663 |
+| 8 | fell off Vanishing Steps, death 8 | dropped: the player spoke | | |
+| 9 | reached the Lava Peaks checkpoint | 307 | 1035 | 2022 |
+| 10 | fell off Conveyor Crush, death 9 | 317 | 654 | 1511 |
+| 11 | finished the course | 283 | 764 | 1828 |
+| | **median** | 295 | 704 | 1655 |
+| | **p90** (nearest rank) | 328 | 847 | 1904 |
+| | **max** | 498 | 1035 | 2022 |
+
+### Findings
+
+- Without the character block the narrator denied having a body ("I'm a narrator, not a
+  hairball"). With it, Grumple owns his looks ("I'm a purple fuzzball with a headset, sweetheart,
+  I'm built for harsh"). The personality text set on the Character in Runway is not used in this
+  stack: Claude writes every line and Runway only renders the audio.
+- Lines cut off by the 60-token cap: 1 of 16 in G1 and 1 of 15 in G2.
+- Two sessions between G1 and G2 are not counted. In one the avatar vanished about 90 s in
+  because the Runway account had run out of credits; Runway sent the agent no error, and the
+  narrator kept talking with nothing on screen. The agent now logs when the avatar leaves. In the
+  other, a bug in the timing code stopped the per-reply lines after 53 s; it is fixed, and G2 timed
+  every reply, including two the player spoke over.
+- The cat fallback (secret unset) was not replayed after the change.
+
 ## Caveats
 
 - One run per configuration. Differences of 0.1 s between runs A and B are noise.
@@ -159,5 +220,5 @@ Event 20 did not fire: the session's time budget ran out.
 
 - Ways to cut the avatar's ~0.9 s, or running without the avatar on this stack for a direct v1
   comparison.
-- `eleven_flash_v2_5` or a faster LLM.
+- `eleven_flash_v2_5`. A faster LLM (Haiku) is covered in the Grumple section only.
 - Viewer-side latency, other regions, or more than one viewer.
